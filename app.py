@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="YouTube 逐字稿下載器", page_icon="📝")
 st.title("YouTube 逐字稿 TXT 下載器")
-st.caption("直連 YouTube 後端資料流，支援自動辨識與直播重播逐字稿")
+st.caption("直連 YouTube 官方資料流，支援長影片、直播重播與自動辨識字幕")
 
 def extract_video_id(url: str):
     patterns = [
@@ -26,79 +26,109 @@ def format_time(seconds: float) -> str:
     h, m = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"00:{m:02d}:{s:02d}"
 
+def parse_caption_content(base_url: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    # 策略 1：嘗試 json3 格式
+    try:
+        res = requests.get(base_url + "&fmt=json3", headers=headers, timeout=12)
+        if res.status_code == 200 and res.text.strip().startswith("{"):
+            data = res.json()
+            lines = []
+            for ev in data.get("events", []):
+                if "segs" in ev:
+                    start_sec = ev.get("tStartMs", 0) / 1000.0
+                    text = "".join([s.get("utf8", "") for s in ev.get("segs", [])]).replace("\n", " ").strip()
+                    if text:
+                        lines.append(f"[{format_time(start_sec)}] {text}")
+            if lines:
+                return lines
+    except Exception:
+        pass
+
+    # 策略 2：備用 XML 格式
+    res = requests.get(base_url, headers=headers, timeout=12)
+    root = ET.fromstring(res.text)
+    lines = []
+    for elem in root.findall("text"):
+        start_sec = float(elem.attrib.get("start", 0))
+        text = html.unescape(elem.text or "").replace("\n", " ").strip()
+        if text:
+            lines.append(f"[{format_time(start_sec)}] {text}")
+    return lines
+
 def fetch_youtube_transcript(video_id: str):
-    """透過 YouTube Android Innertube API 直接獲取字幕軌數據"""
-    api_url = "https://www.youtube.com/youtubei/v1/player"
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "com.google.android.youtube/19.29.35 (Linux; U; Android 11) gzip"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"
     }
-    payload = {
+
+    caption_tracks = []
+
+    # 方案 A：Web Innertube API
+    innertube_payload = {
         "context": {
             "client": {
-                "clientName": "ANDROID",
-                "clientVersion": "19.29.35",
                 "hl": "zh-TW",
-                "gl": "TW"
+                "gl": "TW",
+                "clientName": "WEB",
+                "clientVersion": "2.20240101.00.00"
             }
         },
         "videoId": video_id
     }
 
-    response = requests.post(api_url, json=payload, headers=headers, timeout=15)
-    if response.status_code != 200:
-        raise Exception(f"YouTube 伺服器回應異常 (狀態碼: {response.status_code})")
+    try:
+        r = requests.post(
+            "https://www.youtube.com/youtubei/v1/player",
+            json=innertube_payload,
+            headers=headers,
+            timeout=12
+        )
+        if r.status_code == 200:
+            data = r.json()
+            caption_tracks = data.get("captions", {}).get("playerCaptionsTracklistRenderer", {}).get("captionTracks", [])
+    except Exception:
+        pass
 
-    data = response.json()
-    
-    # 檢查是否含有字幕軌
-    captions = data.get("captions", {}).get("playerCaptionsTracklistRenderer", {}).get("captionTracks", [])
-    if not captions:
-        raise Exception("該影片後台尚未生成語音辨識字幕，或創作者已停用逐字稿功能。")
+    # 方案 B：網頁端播放器數據提取（備用）
+    if not caption_tracks:
+        try:
+            page_res = requests.get(f"https://www.youtube.com/watch?v={video_id}", headers=headers, timeout=12)
+            match = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});(?:var\s|window\[|\n|</script>)', page_res.text)
+            if match:
+                player_data = json.loads(match.group(1))
+                caption_tracks = player_data.get("captions", {}).get("playerCaptionsTracklistRenderer", {}).get("captionTracks", [])
+            else:
+                cap_match = re.search(r'"captionTracks":\[(.*?)\]', page_res.text)
+                if cap_match:
+                    caption_tracks = json.loads(f"[{cap_match.group(1)}]")
+        except Exception:
+            pass
 
-    # 1. 優先選取中文或英文軌道，若無則選取第一條預設軌道
+    if not caption_tracks:
+        raise Exception("該影片尚未生成逐字稿，或已設為私人/關閉字幕。")
+
+    # 篩選中文（繁/簡）或英文軌道
     target_track = None
-    for track in captions:
-        lang_code = track.get("languageCode", "").lower()
-        if lang_code in ["zh", "zh-tw", "zh-hk", "zh-cn", "zh-hant", "zh-hans", "en"]:
+    for track in caption_tracks:
+        lang = track.get("languageCode", "").lower()
+        if lang in ["zh", "zh-tw", "zh-hk", "zh-cn", "zh-hant", "zh-hans", "en"]:
             target_track = track
             break
     if not target_track:
-        target_track = captions[0]
+        target_track = caption_tracks[0]
 
     base_url = target_track.get("baseUrl")
     if not base_url:
-        raise Exception("無法解析字幕下載串流網址。")
+        raise Exception("無法取得字幕下載串流。")
 
-    # 2. 請求字幕內容 (使用 json3 格式確保相容性)
-    sub_res = requests.get(base_url + "&fmt=json3", timeout=15)
-    parsed_lines = []
+    return parse_caption_content(base_url)
 
-    if sub_res.status_code == 200 and sub_res.text.strip().startswith("{"):
-        sub_data = sub_res.json()
-        events = sub_data.get("events", [])
-        for ev in events:
-            if "segs" in ev:
-                start_sec = ev.get("tStartMs", 0) / 1000.0
-                text = "".join([s.get("utf8", "") for s in ev.get("segs", [])]).replace("\n", " ").strip()
-                if text:
-                    parsed_lines.append(f"[{format_time(start_sec)}] {text}")
-    else:
-        # 若非 JSON 格式則採用 XML 解析
-        xml_res = requests.get(base_url, timeout=15)
-        root = ET.fromstring(xml_res.text)
-        for elem in root.findall("text"):
-            start_sec = float(elem.attrib.get("start", 0))
-            text = html.unescape(elem.text or "").replace("\n", " ").strip()
-            if text:
-                parsed_lines.append(f"[{format_time(start_sec)}] {text}")
-
-    if not parsed_lines:
-        raise Exception("成功取得字幕軌，但內容為空。")
-
-    return parsed_lines
-
-# 前端介面
+# 前端輸入介面
 url = st.text_input("請貼上 YouTube 影片網址：", placeholder="https://www.youtube.com/watch?v=...")
 
 if url:
