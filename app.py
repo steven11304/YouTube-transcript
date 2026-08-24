@@ -7,7 +7,7 @@ st.title("YouTube 逐字稿 AI 轉錄器")
 st.caption("透過 Google Gemini 多模態影音辨識引擎，直接解析音軌並轉錄精確時間軸")
 
 # 1. API Key 設定（優先讀取 Streamlit Secrets，亦可於介面手動輸入）
-default_api_key = st.secrets.get("GEMINI_API_KEY", "")
+default_api_key = st.secrets.get("AQ.Ab8RN6Jm32y97YVi2xn9D-2ygQ9VBkouKyTv4dfDlMaOttkrmQ", "")
 with st.sidebar:
     st.header("⚙️ 設定")
     user_api_key = st.text_input(
