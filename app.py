@@ -7,7 +7,7 @@ import yt_dlp
 
 st.set_page_config(page_title="YouTube 逐字稿下載器", page_icon="📝")
 st.title("YouTube 逐字稿 TXT 下載器")
-st.caption("搭載 yt-dlp 核心引擎，支援長影片、直播重播與雲端防阻擋")
+st.caption("直連 YouTube 逐字稿資料庫，支援直播重播、長影片與自動辨識字幕")
 
 def extract_video_id(url: str):
     patterns = [
@@ -27,35 +27,35 @@ def format_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"00:{m:02d}:{s:02d}"
 
 def get_transcript_via_ytdlp(video_url: str):
-    """利用 yt-dlp 提取影片的自動辨識或手動字幕軌"""
+    """利用 yt-dlp 僅提取字幕/逐字稿資料，徹底忽略視訊格式驗證"""
     ydl_opts = {
         'skip_download': True,
         'writesubtitles': True,
         'writeautomaticsub': True,
+        'subtitleslangs': ['all'],
         'quiet': True,
         'no_warnings': True,
-        # 模擬 iOS / Web 混合客戶端繞過機房阻擋
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'web', 'mweb']
-            }
-        }
+        # 關鍵配置：略過影片格式檢查，避免直播/串流報錯
+        'ignore_no_formats_error': True,
+        'allow_unplayable_formats': True,
+        'format': '*',
+        'noplaylist': True
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(video_url, download=False)
         
-        # 合併人工字幕與自動生成字幕
+        # 整合人工字幕軌與系統自動語音辨識軌
         subs = info.get('subtitles') or {}
         auto_subs = info.get('automatic_captions') or {}
         all_subs = {**auto_subs, **subs}
 
         if not all_subs:
-            raise Exception("YouTube 伺服器未提供此影片的字幕資料（可能尚未完成語音辨識）。")
+            raise Exception("YouTube 伺服器未提供此影片的字幕資料（可能尚未完成語音辨識或已停用）。")
 
-        # 優先選擇中文或英文軌道
+        # 優先篩選中文或英文軌道
         target_lang = None
-        for lang in ['zh-TW', 'zh-CN', 'zh', 'zh-Hant', 'zh-Hans', 'en']:
+        for lang in ['zh-TW', 'zh-CN', 'zh', 'zh-Hant', 'zh-Hans', 'zh-HK', 'en']:
             if lang in all_subs:
                 target_lang = lang
                 break
@@ -65,7 +65,7 @@ def get_transcript_via_ytdlp(video_url: str):
 
         formats = all_subs[target_lang]
         
-        # 優先獲取 json3 格式，其次選擇 vtt
+        # 優先獲取 json3 格式，其次選擇 vtt / srv
         target_url = None
         for fmt in formats:
             if fmt.get('ext') == 'json3':
@@ -74,8 +74,11 @@ def get_transcript_via_ytdlp(video_url: str):
         if not target_url:
             target_url = formats[0].get('url')
 
-        # 下載並解析字幕資料
-        res = requests.get(target_url, timeout=15)
+        # 下載並解析字幕資料流
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        res = requests.get(target_url, headers=headers, timeout=20)
         lines = []
 
         if target_url.endswith('json3') or res.text.strip().startswith('{'):
@@ -87,7 +90,7 @@ def get_transcript_via_ytdlp(video_url: str):
                     if text:
                         lines.append(f"[{format_time(start_sec)}] {text}")
         else:
-            # VTT / 純文字回退解析
+            # VTT / XML 格式備用解析
             vtt_blocks = re.split(r'\n\s*\n', res.text)
             for block in vtt_blocks:
                 time_match = re.search(r'(\d{2}:)?(\d{2}):(\d{2})[\.,](\d{3})\s*-->', block)
@@ -104,11 +107,11 @@ def get_transcript_via_ytdlp(video_url: str):
                         lines.append(f"[{format_time(total_sec)}] {text}")
 
         if not lines:
-            raise Exception("成功取得字幕軌，但內容為空。")
+            raise Exception("成功取得字幕軌，但內容解析為空。")
 
         return lines
 
-# 前端介面
+# 前端輸入介面
 url = st.text_input("請貼上 YouTube 影片網址：", placeholder="https://www.youtube.com/watch?v=...")
 
 if url:
@@ -117,7 +120,7 @@ if url:
         st.error("無法解析此網址，請確認是否為正確的 YouTube 連結。")
     else:
         if st.button("開始提取逐字稿", type="primary"):
-            with st.spinner("正在透過 yt-dlp 核心讀取 YouTube 逐字稿資料流..."):
+            with st.spinner("正在向 YouTube 伺服器提取逐字稿資料流..."):
                 try:
                     output_lines = get_transcript_via_ytdlp(url)
                     full_text = "\n".join(output_lines)
